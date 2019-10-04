@@ -742,6 +742,8 @@ func init() {
 	externalDeps[buildBundlesCmd] = []string{
 		"rpm",
 		"dnf",
+		"rpm2cpio",
+		"cpio",
 	}
 	externalDeps[buildUpdateCmd] = []string{
 		"openssl",
