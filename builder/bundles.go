@@ -366,7 +366,7 @@ func resolvePackages(numWorkers int, set bundleSet, packagerCmd []string, emptyD
 	return &bundleRepoPkgs
 }
 
-func installFilesystem(packagerCmd []string, chrootDir string) error {
+func installFilesystem(packagerCmd []string, chrootDir string, localPath string) error {
 	_, err := downloadRpms(packagerCmd, []string{"filesystem"}, chrootDir, 1)
 	if err != nil {
 		return err
@@ -383,6 +383,23 @@ func installFilesystem(packagerCmd []string, chrootDir string) error {
 		return fmt.Errorf("cant find rpms packages")
 	}
 	rpmFull := "filesystem" + "*.rpm"
+
+	localPathFull, err := filepath.Glob(filepath.Join(localPath, rpmFull))
+	if err != nil {
+		fmt.Println("cant find rpm path")
+		return err
+	}
+
+	for _, v := range localPathFull {
+		fmt.Println("inside loacl path , ", v)
+		if rpmMap[v] {
+			continue
+		}
+		err = extractRpm(chrootDir, v)
+		if err != nil {
+			return err
+		}
+	}
 
 	fullPath, err := filepath.Glob(filepath.Join(newPath[0], rpmFull))
 	if err != nil {
@@ -436,7 +453,7 @@ func buildOsCore(b *Builder, packagerCmd []string, chrootDir, version string) er
 		return err
 	}
 
-	if err := installFilesystem(packagerCmd, chrootDir); err != nil {
+	if err := installFilesystem(packagerCmd, chrootDir, b.Config.Mixer.LocalRepoDir); err != nil {
 		return err
 	}
 
@@ -541,7 +558,7 @@ func extractRpm(baseDir string, rpm string) error {
 
 var elapsedTime time.Duration
 
-func installBundleToFull(packagerCmd []string, buildVersionDir string, bundle *bundle, downloadRetries int, numWorkers int) error {
+func installBundleToFull(packagerCmd []string, buildVersionDir string, bundle *bundle, downloadRetries int, numWorkers int, localPath string) error {
 	defer timeTrack(time.Now(), "installBundleToFull"+bundle.Name)
 	var err error
 	baseDir := filepath.Join(buildVersionDir, "full")
@@ -607,6 +624,24 @@ func installBundleToFull(packagerCmd []string, buildVersionDir string, bundle *b
 			if err != nil {
 				fmt.Println("cant find rpm path")
 				return err
+			}
+			localPathFull, err := filepath.Glob(filepath.Join(localPath, rpmFull))
+			if err != nil {
+				fmt.Println("cant find rpm path")
+				return err
+			}
+			for _, path := range localPathFull {
+				fmt.Println("from localPth ", path)
+				if rpmMap[path] {
+					continue
+				}
+				rpmMap[path] = true
+				select {
+				case rpmCh <- path:
+				case <-errorCh:
+					// break as soon as there is a failure.
+					break
+				}
 			}
 			for _, path := range fullPath {
 				if rpmMap[path] {
@@ -704,7 +739,7 @@ func buildFullChroot(b *Builder, set *bundleSet, packagerCmd []string, buildVers
 			}
 		}
 
-		if err := installBundleToFull(packagerCmd, buildVersionDir, bundle, downloadRetries, numWorkers); err != nil {
+		if err := installBundleToFull(packagerCmd, buildVersionDir, bundle, downloadRetries, numWorkers, b.Config.Mixer.LocalRepoDir); err != nil {
 			return err
 		}
 
