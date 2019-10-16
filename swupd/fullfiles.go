@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // debugFullfiles is a flag to turn on debug statements for fullfile creation.
@@ -37,6 +38,7 @@ var fullfileCompressors = []struct {
 	{"external-bzip2", externalCompressFunc("bzip2")},
 	{"external-gzip", externalCompressFunc("gzip")},
 	{"external-xz", externalCompressFunc("xz")},
+	{"external-zstd", externalCompressFunc("zstd")},
 }
 
 // FullfilesInfo holds statistics about a fullfile generation.
@@ -46,10 +48,20 @@ type FullfilesInfo struct {
 	CompressedCounts map[string]uint
 }
 
+var totalUncompress int64
+var compress int64
+
+func timeTrack(start time.Time, name string) {
+	       elapsed := time.Since(start)
+	       log.Printf("%s took %s", name, elapsed)
+	}
+
 // CreateFullfiles creates full file compressed tars for files in chrootDir and places
 // them in outputDir. It doesn't regenerate full files that already exist. If number
 // of workers is zero or less, 1 worker is used.
 func CreateFullfiles(m *Manifest, chrootDir, outputDir string, numWorkers int) (*FullfilesInfo, error) {
+	defer timeTrack(time.Now(), "CreateFullfiles")
+
 	var err error
 	if _, err = os.Stat(chrootDir); err != nil {
 		return nil, fmt.Errorf("couldn't access the full chroot: %s", err)
@@ -154,6 +166,8 @@ func CreateFullfiles(m *Manifest, chrootDir, outputDir string, numWorkers int) (
 			total.CompressedCounts[k] += v
 		}
 	}
+	fmt.Println("Total size before compression", totalUncompress)
+	fmt.Println("Total size after compression", compress)
 
 	return total, nil
 }
@@ -229,6 +243,7 @@ func createRegularFullfile(input, name, output string, info *FullfilesInfo) (err
 	if err != nil {
 		return fmt.Errorf("couldn't create uncompressed fullfile: %s", err)
 	}
+
 	defer func() {
 		cerr := uncompressed.Close()
 		if err == nil {
@@ -243,7 +258,7 @@ func createRegularFullfile(input, name, output string, info *FullfilesInfo) (err
 	if err != nil {
 		return fmt.Errorf("couldn't find the size of uncompressed fullfile: %s", err)
 	}
-
+	totalUncompress = totalUncompress + uncompressedSize
 	if debugFullfiles {
 		log.Printf("DEBUG: Creating fullfile %s for regular file %s (%d bytes)", name, input, fi.Size())
 		log.Printf("DEBUG: %s (%d bytes, uncompressed)", filepath.Base(output), uncompressedSize)
@@ -295,7 +310,7 @@ func createRegularFullfile(input, name, output string, info *FullfilesInfo) (err
 			log.Printf("DEBUG: %s (%d bytes)", filepath.Base(candidate), candidateSize)
 		}
 	}
-
+	compress = compress + bestSize
 	var bestName string
 	if best != "" {
 		bestName = filepath.Ext(best)[1:]
