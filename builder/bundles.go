@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
 	"os"
@@ -306,7 +305,7 @@ func repoPkgFromNoopInstall(installOut string) repoPkgMap {
 	pkgs := parseNoopInstall(installOut)
 
 	for _, p := range pkgs {
-		name := p.name + "-" + p.version + "." + p.arch
+		name := p.name + "-" + p.version + "." + p.arch + ".rpm"
 		repoPkgs[p.repo] = append(repoPkgs[p.repo], name)
 	}
 	return repoPkgs
@@ -420,11 +419,11 @@ func buildOsCore(b *Builder, packagerCmd []string, chrootDir, version string) er
 	if err != nil {
 		return err
 	}
-
-	if err := installFilesystem(packagerCmd, chrootDir, b.Config.Mixer.LocalRepoDir); err != nil {
-		return err
-	}
-
+	/*
+		if err := installFilesystem(packagerCmd, chrootDir, b.Config.Mixer.LocalRepoDir); err != nil {
+			return err
+		}
+	*/
 	if err := createClearDir(chrootDir, version); err != nil {
 		return err
 	}
@@ -494,44 +493,13 @@ func downloadRpms(packagerCmd, rpmList []string, baseDir string, maxRetries int)
 }
 
 func extractRpm(baseDir string, rpm string) error {
-	cmd := exec.Command("rpm2cpio", rpm)
+	//cmd2 := "for x in $(cat " + rpm + "); do parallel echo $x| rpm2cpio $x | sudo cpio -id; done"
+	cmd2 := "parallel 'rpm2cpio {} | sudo cpio -idm' < " + rpm
+	cmd := exec.Command("/bin/sh", "-c", cmd2)
 	cmd.Env = os.Environ()
-	cmd2 := exec.Command("sudo", "cpio", "-id")
-	cmd2.Env = os.Environ()
-	cmd2.Dir = baseDir
-
-	pr, pw := io.Pipe()
-	cmd.Stdout = pw
-	cmd2.Stdin = pr
-
-	var err error
-	err = cmd.Start()
-	if err != nil {
-		fmt.Println(err.Error())
-		return err
-	}
-	err = cmd2.Start()
-	if err != nil {
-		fmt.Println(err.Error())
-		return err
-	}
-	err = cmd.Wait()
-	if err != nil {
-		fmt.Println(err.Error())
-		return err
-	}
-	err = pw.Close()
-	if err != nil {
-		fmt.Println(err.Error())
-		return err
-	}
-	err = cmd2.Wait()
-	if err != nil {
-		fmt.Println(err.Error())
-		return err
-	}
-
-	return nil
+	cmd.Dir = baseDir
+	err := cmd.Run()
+	return err
 }
 
 var elapsedTime time.Duration
@@ -540,32 +508,7 @@ func installBundleToFull(packagerCmd []string, buildVersionDir string, bundle *b
 	//	defer timeTrack(time.Now(), "installBundleToFull"+bundle.Name)
 	var err error
 	baseDir := filepath.Join(buildVersionDir, "full")
-	rpmList := []string{}
-	var wg sync.WaitGroup
-	rpmCh := make(chan string)
-	errorCh := make(chan error, numWorkers)
-
-	if len(bundle.AllPackages) < numWorkers {
-		numWorkers = len(bundle.AllPackages)
-	}
-
-	wg.Add(numWorkers)
-
-	rpmWorker := func() {
-		for rpm := range rpmCh {
-			e := extractRpm(baseDir, rpm)
-			if e != nil {
-				errorCh <- e
-				break
-			}
-		}
-		wg.Done()
-	}
-
-	for i := 0; i < numWorkers; i++ {
-		go rpmWorker()
-	}
-
+	var rpmList string
 	// feed the channel
 	for rpm := range bundle.AllPackages {
 		rpmFull := rpm + "*.rpm"
@@ -580,39 +523,13 @@ func installBundleToFull(packagerCmd []string, buildVersionDir string, bundle *b
 		if rpmMap[fullPath[0]] {
 			continue
 		}
-		rpmList = append(rpmList, fullPath[0])
-		rpmMap[fullPath[0]] = true
-		select {
-		case rpmCh <- fullPath[0]:
-		case err = <-errorCh:
-			// break as soon as there is a failure.
-			break
-		}
+		rpmList = rpmList + " " + fullPath[0]
 	}
-
-	bundleDir := filepath.Join(baseDir, "usr/share/clear/bundles")
-	err = os.MkdirAll(filepath.Join(bundleDir), 0755)
+	err = extractRpm(baseDir, rpmList)
 	if err != nil {
 		return err
 	}
 
-	err = ioutil.WriteFile(filepath.Join(bundleDir, bundle.Name), nil, 0644)
-	if err != nil {
-		return nil
-	}
-
-	metaPath := filepath.Join(baseDir, "usr/share/clear/allbundles")
-	err = os.MkdirAll(metaPath, 0755)
-	if err != nil {
-		return err
-	}
-
-	err = writeBundleInfoPretty(bundle, filepath.Join(metaPath, bundle.Name))
-	if err != nil {
-		return err
-	}
-	close(rpmCh)
-	wg.Wait()
 	return nil
 }
 
@@ -662,22 +579,51 @@ func buildFullChroot(b *Builder, set *bundleSet, packagerCmd []string, buildVers
 	}
 	i := 0
 
+	bundleDir := filepath.Join(fullDir, "usr/share/clear/bundles")
+	err = os.MkdirAll(filepath.Join(bundleDir), 0755)
+	if err != nil {
+		return err
+	}
+	metaPath := filepath.Join(fullDir, "usr/share/clear/allbundles")
+	err = os.MkdirAll(metaPath, 0755)
+	if err != nil {
+		return err
+	}
+
+	rpmList := filepath.Join(fullDir, "rpm.txt")
+	f, err := os.OpenFile(rpmList, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
 	rpmMap = make(map[string]bool)
+	var flagOscore bool
 	for _, bundle := range *set {
 		i++
 		fmt.Printf("[%d/%d] %s\n", i, totalBundles, bundle.Name)
 		// special handling for os-core
 		if bundle.Name == "os-core" {
-			fmt.Println("... building special os-core content")
-			if err := buildOsCore(b, packagerCmd, fullDir, version); err != nil {
+			flagOscore = true
+		}
+		// download rpms here
+		for rpm := range bundle.AllPackages {
+			/*
+				fullPath, err := filepath.Glob(filepath.Join(b.Config.Mixer.LocalRepoDir, rpmFull))
+				if err != nil {
+					fmt.Println("cant find rpm path")
+					return err
+				}
+				if len(fullPath) < 1 {
+					continue
+				}
+			*/
+			if rpmMap[rpm] {
+				continue
+			}
+			_, err = f.WriteString(filepath.Join(b.Config.Mixer.LocalRepoDir, rpm) + "\n")
+			if err != nil {
 				return err
 			}
 		}
-
-		if err := installBundleToFull(packagerCmd, buildVersionDir, bundle, downloadRetries, numWorkers, b.Config.Mixer.LocalRepoDir); err != nil {
-			return err
-		}
-
 		// special handling for update bundle
 		if bundle.Name == b.Config.Swupd.Bundle {
 			fmt.Printf("... Adding swupd default values to %s bundle\n", bundle.Name)
@@ -685,8 +631,32 @@ func buildFullChroot(b *Builder, set *bundleSet, packagerCmd []string, buildVers
 				return err
 			}
 		}
+		err = ioutil.WriteFile(filepath.Join(bundleDir, bundle.Name), nil, 0644)
+		if err != nil {
+			return nil
+		}
+		err = writeBundleInfoPretty(bundle, filepath.Join(metaPath, bundle.Name))
+		if err != nil {
+			return err
+		}
 	}
-	fmt.Println("Time to download is ", elapsedTime)
+
+	err = f.Close()
+	if err != nil {
+		return err
+	}
+	err = extractRpm(fullDir, rpmList)
+	if err != nil {
+		fmt.Println("extract failed")
+		fmt.Println(err.Error())
+		return err
+	}
+	if flagOscore {
+		fmt.Println("... building special os-core content")
+		if err := buildOsCore(b, packagerCmd, fullDir, version); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
