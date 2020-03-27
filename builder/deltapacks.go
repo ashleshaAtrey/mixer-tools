@@ -22,12 +22,14 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/clearlinux/mixer-tools/swupd"
 	"github.com/pkg/errors"
 )
 
 func createDeltaPacks(fromMoM *swupd.Manifest, toMoM *swupd.Manifest, printReport bool, outputDir, bundleDir string, numWorkers int) error {
+	defer timeTrack(time.Now(), "createDeltaPacks")
 	timer := &stopWatch{w: os.Stdout}
 	defer timer.WriteSummary(os.Stdout)
 	timer.Start("CREATE DELTA PACKS")

@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/clearlinux/mixer-tools/config"
 	"github.com/clearlinux/mixer-tools/helpers"
@@ -524,11 +525,18 @@ func (b *Builder) generateImageConfig(configFile string) error {
 
 	return convertCmd.Run()
 }
+func timeTrack(start time.Time, name string) {
+
+	elapsed := time.Since(start)
+
+	log.Printf("%s took %s", name, elapsed)
+
+}
 
 // BuildDeltaPacks between two versions of the mix.
 func (b *Builder) BuildDeltaPacks(from, to uint32, printReport bool) error {
+	defer timeTrack(time.Now(), "BuildDeltaPacks")
 	var err error
-
 	if to == 0 {
 		to = b.MixVerUint32
 	} else {
@@ -564,6 +572,7 @@ func (b *Builder) BuildDeltaPacks(from, to uint32, printReport bool) error {
 	defer func() {
 		_ = logFile.Close()
 	}()
+
 	err = swupd.CreateAllDeltas(outputDir, int(fromManifest.Header.Version), int(toManifest.Header.Version), b.NumDeltaWorkers, bsdiffLog)
 	if err != nil {
 		return err

@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 )
 
 var debugPacks = false
@@ -74,11 +75,18 @@ func (state PackState) String() string {
 	}
 	return "invalid"
 }
+func timeTrack(start time.Time, name string) {
 
+	elapsed := time.Since(start)
+
+	log.Printf("%s took %s", name, elapsed)
+
+}
 // CreateAllDeltas builds all of the deltas using the full manifest from one
 // version to the next. This allows better concurrency and the pack creation
 // code can just worry about adding pre-existing files to packs.
 func CreateAllDeltas(outputDir string, fromVersion, toVersion, numWorkers int, bsdiffLog *log.Logger) error {
+	defer timeTrack(time.Now(), "CreateAllDeltas")
 	// Don't try to make deltas for zero packs
 	if fromVersion == 0 {
 		return nil

@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/clearlinux/mixer-tools/helpers"
 	"github.com/pkg/errors"
@@ -85,6 +86,7 @@ func CreateBsdiffLogger(stateDir string) (*log.Logger, *os.File, error) {
 }
 
 func createDeltasFromManifests(c *config, oldManifest, newManifest *Manifest, numWorkers int, bsdiffLog *log.Logger) ([]Delta, error) {
+	defer timeTrack(time.Now(), "createDeltasFromManifests")
 	deltas, err := findDeltas(c, oldManifest, newManifest)
 	if err != nil {
 		return nil, errors.Wrapf(err, "Failed to create deltas list %s", newManifest.Name)
@@ -323,6 +325,7 @@ func createDelta(c *config, oldPath, newPath string, delta *Delta, bsdiffLog *lo
 }
 
 func findDeltas(c *config, oldManifest, newManifest *Manifest) ([]Delta, error) {
+	defer timeTrack(time.Now(), "findDeltas")
 	oldManifest.sortFilesName()
 	newManifest.sortFilesName()
 

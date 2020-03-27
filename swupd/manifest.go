@@ -212,6 +212,7 @@ var requiredManifestHeaderEntries = []string{
 
 // ParseManifestFile creates a Manifest from file in path.
 func ParseManifestFile(path string) (*Manifest, error) {
+	defer timeTrack(time.Now(), "ParseManifestFile")
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
