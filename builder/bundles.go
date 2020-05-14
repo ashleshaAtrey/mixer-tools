@@ -830,7 +830,7 @@ func buildFullChroot(b *Builder, set *bundleSet, packagerCmd []string, buildVers
 	// Resolve bundle content chroots against the full chroot. New files are copied
 	// to the full chroot and the bundle file lists are updated to contain the files
 	// within the chroot.
-	if err = addBundleContentChroots(set, fullDir); err != nil {
+	if err = addBundleContentChroots(set, fullDir, numWorkers); err != nil {
 		return err
 	}
 
@@ -864,98 +864,136 @@ func installSpecialFilesToFull(b *Builder, packagerCmd []string, set *bundleSet,
 
 // addBundleContentChroots resolves each bundle's content choots against the full chroot
 // and updates the bundle file lists.
-func addBundleContentChroots(set *bundleSet, fullDir string) error {
+func addBundleContentChroots(set *bundleSet, fullDir string, numWorkers int) error {
 	// Resolve bundle content chroots against the full chroot. Content chroot files
 	// that do not conflict with the full chroot are copied into the full chroot and
 	// added to the corresponding bundle's bundle-info file. Files that conflict with
 	// the full chroot will generate an error.
-	for _, bundle := range *set {
-		for chrootPath := range bundle.ContentChroots {
-			if _, err := os.Stat(chrootPath); err != nil {
-				return err
-			}
+	var err error
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+	bundleCh := make(chan *bundle)
+	errorCh := make(chan error, numWorkers)
+	defer close(errorCh)
 
-			err := filepath.Walk(chrootPath, func(path string, fi os.FileInfo, err error) error {
-				if err != nil {
-					return err
+	contentWorker := func() {
+		defer wg.Done()
+		for bundle := range bundleCh {
+			for chrootPath := range bundle.ContentChroots {
+				if _, err := os.Stat(chrootPath); err != nil {
+					errorCh <- err
+					return
 				}
 
-				filePath := strings.TrimPrefix(path, chrootPath)
-				fullChrootFile := filepath.Join(fullDir, filePath)
+				err := filepath.Walk(chrootPath, func(path string, fi os.FileInfo, err error) error {
+					if err != nil {
+						return err
+					}
 
-				// Skip content chroot directory
-				if filePath == "" {
-					return nil
-				}
+					filePath := strings.TrimPrefix(path, chrootPath)
+					fullChrootFile := filepath.Join(fullDir, filePath)
 
-				// Add file to bundle-info file list
-				bundle.Files[filePath] = isExportable(filePath, bundle.UnExport)
-
-				// When the content chroot file exists in the full chroot verify that they
-				// are the same.
-				if fullInfo, err := os.Lstat(fullChrootFile); err == nil {
-					if fullInfo.IsDir() && fi.IsDir() {
-						if fullInfo.Mode() != fi.Mode() {
-							return errors.Errorf("Directory permission mismatch: %s, %s", fullChrootFile, path)
-						}
-
-						srcDir, ok := fi.Sys().(*syscall.Stat_t)
-						if !ok {
-							return errors.Errorf("Cannot get directory ownership: %s", path)
-						}
-						targDir, ok := fullInfo.Sys().(*syscall.Stat_t)
-						if !ok {
-							return errors.Errorf("Cannot get directory ownership: %s", fullChrootFile)
-						}
-						if srcDir.Uid != targDir.Uid || srcDir.Gid != targDir.Gid {
-							return errors.Errorf("Directory ownership mismatch: %s, %s", fullChrootFile, path)
-						}
-
+					// Skip content chroot directory
+					if filePath == "" {
 						return nil
 					}
 
-					h1, err := swupd.Hashcalc(fullChrootFile)
-					if err != nil {
-						return err
+					// Add file to bundle-info file list
+					bundle.Files[filePath] = isExportable(filePath, bundle.UnExport)
+
+					// When the content chroot file exists in the full chroot verify that they
+					// are the same.
+					if fullInfo, err := os.Lstat(fullChrootFile); err == nil {
+						if fullInfo.IsDir() && fi.IsDir() {
+							if fullInfo.Mode() != fi.Mode() {
+								return errors.Errorf("Directory permission mismatch: %s, %s", fullChrootFile, path)
+							}
+
+							srcDir, ok := fi.Sys().(*syscall.Stat_t)
+							if !ok {
+								return errors.Errorf("Cannot get directory ownership: %s", path)
+							}
+							targDir, ok := fullInfo.Sys().(*syscall.Stat_t)
+							if !ok {
+								return errors.Errorf("Cannot get directory ownership: %s", fullChrootFile)
+							}
+							if srcDir.Uid != targDir.Uid || srcDir.Gid != targDir.Gid {
+								return errors.Errorf("Directory ownership mismatch: %s, %s", fullChrootFile, path)
+							}
+							return nil
+						}
+
+						h1, err := swupd.Hashcalc(fullChrootFile)
+						if err != nil {
+							return err
+						}
+						h2, err := swupd.Hashcalc(path)
+						if err != nil {
+							return err
+						}
+						if !swupd.HashEquals(h1, h2) {
+							return errors.Errorf("Chroot File conflict: %s, %s", fullChrootFile, path)
+						}
+						return nil
 					}
-					h2, err := swupd.Hashcalc(path)
-					if err != nil {
-						return err
+
+					if fi.IsDir() {
+						if err = os.Mkdir(fullChrootFile, fi.Mode()); err != nil {
+							return err
+						}
+
+						dirStat, ok := fi.Sys().(*syscall.Stat_t)
+						if !ok {
+							return errors.Errorf("Cannot get directory ownership: %s", path)
+						}
+						err = os.Chown(fullChrootFile, int(dirStat.Uid), int(dirStat.Gid))
+						if err != nil {
+							return err
+						}
+
+						// umask prevents setting the permissions correctly when creating the target directory,
+						// so the permissions are set after the directory is created.
+						return os.Chmod(fullChrootFile, fi.Mode())
 					}
-					if !swupd.HashEquals(h1, h2) {
-						return errors.Errorf("Chroot File conflict: %s, %s", fullChrootFile, path)
-					}
-					return nil
+
+					// Do not resolve symlinks so that the links can be copied, do not
+					// sync to disk which significantly improves I/O performance, and
+					// use the source file's permissions for the target.
+					return helpers.CopyFileWithOptions(fullChrootFile, path, false, false, true)
+				})
+				if err != nil {
+					errorCh <- err
+					return
 				}
-
-				if fi.IsDir() {
-					if err = os.Mkdir(fullChrootFile, fi.Mode()); err != nil {
-						return err
-					}
-
-					dirStat, ok := fi.Sys().(*syscall.Stat_t)
-					if !ok {
-						return errors.Errorf("Cannot get directory ownership: %s", path)
-					}
-					err = os.Chown(fullChrootFile, int(dirStat.Uid), int(dirStat.Gid))
-					if err != nil {
-						return err
-					}
-
-					// umask prevents setting the permissions correctly when creating the target directory,
-					// so the permissions are set after the directory is created.
-					return os.Chmod(fullChrootFile, fi.Mode())
-				}
-
-				// Do not resolve symlinks so that the links can be copied, do not
-				// sync to disk which significantly improves I/O performance, and
-				// use the source file's permissions for the target.
-				return helpers.CopyFileWithOptions(fullChrootFile, path, false, false, true)
-			})
-			if err != nil {
-				return err
 			}
 		}
+	}
+
+	for i := 0; i < numWorkers; i++ {
+		go contentWorker()
+	}
+
+	for _, bundle := range *set {
+		select {
+		case bundleCh <- bundle:
+		case err = <-errorCh:
+			// break as soon as there is a failure
+			break
+		}
+		if err != nil {
+			break
+		}
+	}
+	close(bundleCh)
+	wg.Wait()
+
+	if err != nil {
+		return err
+	}
+	// an error could happen after all the workers are spawned so check again for an
+	// error after wg.Wait() completes.
+	if len(errorCh) > 0 {
+		return <-errorCh
 	}
 	return nil
 }
